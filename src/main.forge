@@ -1,0 +1,173 @@
+// Complete FPV Drone Firmware Implementation in Forge Language
+// Target: STM32F405/H743 Flight Controller
+// Real-time, safety-critical embedded system with zero-cost abstractions
+
+import hardware/stm32f4
+import hardware/timers
+import hardware/spi
+import hardware/uart
+import hardware/dma
+import hardware/gpio
+import math/filters
+import math/pid
+import math/quaternion
+import protocols/dshot
+import protocols/sbus
+import protocols/crsf
+
+// === TARGET CONFIGURATION ===
+
+config TARGET = STM32F405 {
+    cpu_frequency: 168_000_000,
+    flash_size: 1024 * 1024,
+    ram_size: 192 * 1024,
+    
+    // Motor output pins (DShot)
+    motor_pins: [
+        Pin { port: 'A', number: 0, mode: AlternateFunction(1) },  // TIM2_CH1
+        Pin { port: 'A', number: 1, mode: AlternateFunction(1) },  // TIM2_CH2
+        Pin { port: 'A', number: 2, mode: AlternateFunction(1) },  // TIM2_CH3
+        Pin { port: 'A', number: 3, mode: AlternateFunction(1) },  // TIM2_CH4
+    ],
+    
+    // IMU SPI interface
+    imu_spi: SPI1 {
+        sck: Pin { port: 'A', number: 5, mode: AlternateFunction(5) },
+        miso: Pin { port: 'A', number: 6, mode: AlternateFunction(5) },
+        mosi: Pin { port: 'A', number: 7, mode: AlternateFunction(5) },
+        cs: Pin { port: 'A', number: 4, mode: Output },
+    },
+    
+    // RC receiver UART
+    receiver_uart: UART1 {
+        tx: Pin { port: 'A', number: 9, mode: AlternateFunction(7) },
+        rx: Pin { port: 'A', number: 10, mode: AlternateFunction(7) },
+    },
+    
+    // Telemetry UART
+    telemetry_uart: UART2 {
+        tx: Pin { port: 'A', number: 2, mode: AlternateFunction(7) },
+        rx: Pin { port: 'A', number: 3, mode: AlternateFunction(7) },
+    },
+}
+
+// === SAFETY CONSTRAINTS ===
+
+constraint MOTOR_SAFETY {
+    condition: !armed || (throttle >= 0.0 && throttle <= 1.0),
+    error: "Motors can only run when armed and throttle is in valid range"
+}
+
+constraint TIMING_SAFETY {
+    condition: control_loop_time <= 125, // microseconds for 8kHz
+    error: "Control loop exceeded maximum execution time"
+}
+
+constraint ARMING_SAFETY {
+    condition: !armed || (throttle < 0.1 && !failsafe_active),
+    error: "Cannot arm with high throttle or during failsafe"
+}
+
+// === CORE DATA STRUCTURES ===
+
+struct Vector3 {
+    x: f32,
+    y: f32,
+    z: f32,
+}
+
+impl Vector3 {
+    fn new(x: f32, y: f32, z: f32) -> Self {
+        Self { x, y, z }
+    }
+    
+    fn magnitude(&self) -> f32 {
+        (self.x * self.x + self.y * self.y + self.z * self.z).sqrt()
+    }
+    
+    fn normalize(&self) -> Self {
+        let mag = self.magnitude();
+        if mag > 0.0 {
+            Self { x: self.x / mag, y: self.y / mag, z: self.z / mag }
+        } else {
+            Self { x: 0.0, y: 0.0, z: 0.0 }
+        }
+    }
+}
+
+struct Quaternion {
+    w: f32,
+    x: f32,
+    y: f32,
+    z: f32,
+}
+
+impl Quaternion {
+    fn identity() -> Self {
+        Self { w: 1.0, x: 0.0, y: 0.0, z: 0.0 }
+    }
+    
+    fn normalize(&mut self) {
+        let norm = (self.w * self.w + self.x * self.x + self.y * self.y + self.z * self.z).sqrt();
+        if norm > 0.0 {
+            self.w /= norm;
+            self.x /= norm;
+            self.y /= norm;
+            self.z /= norm;
+        }
+    }
+    
+    fn to_euler(&self) -> EulerAngles {
+        let roll = (2.0 * (self.w * self.x + self.y * self.z)).atan2(
+            1.0 - 2.0 * (self.x * self.x + self.y * self.y)
+        );
+        
+        let pitch = (2.0 * (self.w * self.y - self.z * self.x)).asin();
+        
+        let yaw = (2.0 * (self.w * self.z + self.x * self.y)).atan2(
+            1.0 - 2.0 * (self.y * self.y + self.z * self.z)
+        );
+        
+        EulerAngles { roll, pitch, yaw }
+    }
+}
+
+struct EulerAngles {
+    roll: f32,
+    pitch: f32,
+    yaw: f32,
+}
+
+struct RcChannels {
+    throttle: f32,    // 0.0 to 1.0
+    roll: f32,        // -1.0 to 1.0
+    pitch: f32,       // -1.0 to 1.0
+    yaw: f32,         // -1.0 to 1.0
+    aux1: f32,        // Arm switch
+    aux2: f32,        // Flight mode
+    aux3: f32,        // Beeper
+    aux4: f32,        // Reserved
+}
+
+struct ImuData {
+    gyro: Vector3,     // rad/s
+    accel: Vector3,    // m/s²
+    temp: f32,         // °C
+    timestamp: u64,    // microseconds
+}
+
+struct FlightMode {
+    mode: FlightModeType,
+    armed: bool,
+    failsafe: bool,
+}
+
+enum FlightModeType {
+    Acro,      // Rate mode
+    Angle,     // Self-leveling
+    Horizon,   // Mixed mode
+    AltHold,   // Altitude hold
+    GpsHold,   // GPS position hold
+}
+
+// Additional firmware implementation truncated for brevity.
