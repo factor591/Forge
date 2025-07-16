@@ -1,0 +1,193 @@
+[package]
+name = "fpv-drone-firmware"
+version = "0.1.0"
+authors = ["FPV Developer <dev@fpvdrone.com>"]
+description = "Complete FPV drone flight controller firmware written in Forge"
+license = "MIT"
+repository = "https://github.com/user/fpv-drone-firmware"
+keywords = ["embedded", "drone", "fpv", "flight-controller", "real-time"]
+categories = ["embedded", "aerospace"]
+
+[targets]
+default = "stm32f405"
+
+[targets.stm32f405]
+architecture = "arm-cortex-m4"
+cpu = "cortex-m4"
+fpu = "fpv4-sp-d16"
+memory = { 
+    flash_origin = "0x08000000", 
+    flash_length = "1024K", 
+    ram_origin = "0x20000000", 
+    ram_length = "192K",
+    ccm_origin = "0x10000000",
+    ccm_length = "64K",
+    stack_size = "8K"
+}
+optimization = "release"
+debug_info = true
+linker_script = "memory.ld"
+
+[targets.stm32h743]
+architecture = "arm-cortex-m7"
+cpu = "cortex-m7"
+fpu = "fpv5-d16"
+memory = { 
+    flash_origin = "0x08000000", 
+    flash_length = "2048K", 
+    ram_origin = "0x20000000", 
+    ram_length = "512K",
+    dtcm_origin = "0x20000000",
+    dtcm_length = "128K",
+    itcm_origin = "0x00000000", 
+    itcm_length = "64K",
+    stack_size = "16K"
+}
+optimization = "release"
+debug_info = true
+linker_script = "memory_h743.ld"
+
+[targets.rp2040]
+architecture = "arm-cortex-m0plus"
+cpu = "cortex-m0plus"
+memory = { 
+    flash_origin = "0x10000000", 
+    flash_length = "2048K", 
+    ram_origin = "0x20000000", 
+    ram_length = "264K",
+    stack_size = "4K"
+}
+optimization = "release"
+debug_info = true
+linker_script = "memory_rp2040.ld"
+
+[dependencies]
+embedded-hal = "1.0"
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+nb = "1.0"
+heapless = "0.8"
+
+[dependencies.stm32f4xx-hal]
+version = "0.20"
+features = ["stm32f405", "rt", "usb_fs"]
+optional = true
+
+[dependencies.stm32h7xx-hal]
+version = "0.15"
+features = ["stm32h743v", "rt", "usb_hs"]
+optional = true
+
+[dependencies.rp2040-hal]
+version = "0.9"
+features = ["rt", "critical-section-impl"]
+optional = true
+
+[features]
+default = ["stm32f405", "dshot600", "sbus", "mpu6000", "blackbox"]
+
+# Target selection
+stm32f405 = ["stm32f4xx-hal"]
+stm32h743 = ["stm32h7xx-hal"]
+rp2040 = ["rp2040-hal"]
+
+# ESC protocols
+dshot150 = []
+dshot300 = []
+dshot600 = []
+dshot1200 = []
+
+# RC protocols
+sbus = []
+crsf = []
+ppm = []
+
+# IMU sensors
+mpu6000 = []
+icm20602 = []
+bmi270 = []
+
+# Additional sensors
+bmp280 = []
+ms5611 = []
+gps = []
+
+# OSD support
+max7456 = []
+msp-osd = []
+
+# Logging
+blackbox = []
+sd-card = []
+
+# Safety features
+gps-rescue = ["gps"]
+crash-recovery = []
+
+# Development features
+debug-prints = []
+telemetry = []
+
+[profile.dev]
+optimization = "debug"
+debug_info = true
+overflow_checks = true
+
+[profile.release]
+optimization = "speed"
+debug_info = false
+overflow_checks = false
+lto = true
+
+[profile.size]
+optimization = "size"
+debug_info = false
+overflow_checks = false
+lto = true
+
+[build]
+target-dir = "target"
+rustflags = [
+    "-C", "link-arg=-Tlink.x",
+    "-C", "link-arg=-Tdefmt.x",
+]
+
+[patch.crates-io]
+# Development patches for dependencies if needed
+
+[workspace]
+members = [
+    "tools/flash-tool",
+    "tools/configurator",
+    "tools/blackbox-viewer"
+]
+
+[metadata.forge]
+# Forge-specific metadata
+real_time_constraints = true
+safety_critical = true
+timing_analysis = true
+memory_analysis = true
+
+[metadata.forge.constraints]
+max_loop_time = "125us"  # 8kHz control loop
+max_isr_time = "10us"    # Interrupt service routine limit
+max_stack_usage = "4KB"  # Stack usage limit
+heap_usage = "0B"        # No heap allocation allowed
+
+[metadata.forge.safety]
+arming_checks = [
+    "throttle_low",
+    "no_failsafe", 
+    "gyro_calibrated",
+    "level_attitude"
+]
+emergency_responses = [
+    "rx_loss -> disarm",
+    "battery_low -> emergency_landing",
+    "crash_detected -> disarm"
+]
+
+[metadata.docs]
+all-features = true
+targets = ["thumbv7em-none-eabihf"]
