@@ -170,4 +170,223 @@ enum FlightModeType {
     GpsHold,   // GPS position hold
 }
 
-// Additional firmware implementation truncated for brevity.
+// === MAIN FLIGHT CONTROL TASK === (completion)
+
+task main() -> Result<void, Error> {
+    // ... (previous initialization code remains the same)
+
+    // Initialize telemetry
+    let mut telemetry = TelemetryManager::new(&UART2);
+    telemetry.init()?;
+
+    // Initialize blackbox logger
+    let mut blackbox = BlackboxLogger::new(
+        StorageDevice::SpiFlash(SpiFlashDevice {
+            spi: &SPI2,
+            current_address: 0,
+            capacity: 16 * 1024 * 1024, // 16MB flash
+        })
+    );
+    blackbox.init()?;
+
+    // Initialize safety monitor
+    let mut safety_monitor = SafetyMonitor::new();
+    safety_monitor.arming_checks.gyro_calibrated = true; // Set after calibration
+
+    // Battery monitoring
+    let mut battery_voltage: f32 = 0.0;
+
+    // Main control loop - runs at 8kHz (125 microseconds)
+    let mut loop_timer = Timer::new(125);
+    let mut telemetry_timer = Timer::new(20000); // 50Hz telemetry
+    let mut blackbox_timer = Timer::new(1000);   // 1kHz logging
+
+    loop {
+        let loop_start = get_time_us();
+
+        // Wait for next loop iteration
+        await loop_timer.wait();
+
+        // Read IMU data
+        let imu_data = imu_sensor.read_sensors()?;
+
+        // Update sensor fusion
+        let attitude = sensor_fusion.update(&imu_data);
+
+        // Update RC receiver
+        rc_receiver.update();
+        let rc_channels = rc_receiver.get_channels();
+        let is_failsafe = rc_receiver.is_failsafe();
+
+        // Check arming conditions
+        if rc_channels.aux1 > 0.5 && !flight_controller.mode.armed {
+            // Try to arm
+            if safety_monitor.check_arming_conditions(rc_channels, &attitude, is_failsafe) {
+                motor_controller.arm()?;
+                flight_controller.mode.armed = true;
+                blackbox.start_logging()?;
+            }
+        } else if rc_channels.aux1 < -0.5 && flight_controller.mode.armed {
+            // Disarm
+            motor_controller.disarm();
+            flight_controller.mode.armed = false;
+            blackbox.stop_logging()?;
+        }
+
+        // Monitor flight safety
+        let emergency_responses = safety_monitor.monitor_flight_safety(
+            rc_channels,
+            &attitude,
+            &imu_data.gyro,
+            battery_voltage,
+            is_failsafe
+        );
+
+        // Handle emergency responses
+        for response in emergency_responses {
+            match response {
+                EmergencyResponse::Disarm => {
+                    motor_controller.disarm();
+                    flight_controller.mode.armed = false;
+                }
+                EmergencyResponse::EmergencyLanding => {
+                    // Gradually reduce throttle
+                    flight_controller.mode.failsafe = true;
+                }
+                EmergencyResponse::ReturnToHome => {
+                    // Not implemented in basic version
+                }
+            }
+        }
+
+        // Run flight control
+        let motor_outputs = flight_controller.update(
+            rc_channels,
+            &attitude,
+            &imu_data.gyro,
+            is_failsafe
+        );
+
+        // Update motor outputs
+        motor_controller.update_motors(motor_outputs);
+
+        // Telemetry update at 50Hz
+        if await telemetry_timer.check() {
+            telemetry.send_status(
+                &flight_controller.mode,
+                &attitude,
+                rc_channels,
+                battery_voltage
+            )?;
+        }
+
+        // Blackbox logging at 1kHz
+        if flight_controller.mode.armed && await blackbox_timer.check() {
+            blackbox.log_frame(
+                &imu_data,
+                &attitude,
+                rc_channels,
+                &motor_outputs,
+                battery_voltage
+            )?;
+        }
+
+        // Read battery voltage (simple ADC read)
+        battery_voltage = read_battery_voltage();
+
+        // Check loop timing for real-time constraints
+        let loop_time = get_time_us() - loop_start;
+        if loop_time > 125 {
+            // Log timing violation
+            // In production, this could trigger failsafe
+        }
+
+        // Feed watchdog if enabled
+        #[cfg(feature = "watchdog")]
+        watchdog_feed();
+    }
+}
+
+// === ADDITIONAL UTILITY FUNCTIONS ===
+
+fn read_battery_voltage() -> f32 {
+    // Read ADC value and convert to voltage
+    // Assuming voltage divider with 11:1 ratio
+    let adc_value = ADC1.read_channel(8)?; // Channel 8 for battery
+    let voltage = (adc_value as f32 / 4096.0) * 3.3 * 11.0;
+    voltage
+}
+
+fn watchdog_feed() {
+    // Reset watchdog timer
+    IWDG.reset();
+}
+
+// === TIMER IMPLEMENTATION ===
+
+struct Timer {
+    period_us: u64,
+    last_trigger: u64,
+}
+
+impl Timer {
+    fn new(period_us: u64) -> Self {
+        Self {
+            period_us,
+            last_trigger: get_time_us(),
+        }
+    }
+
+    async fn wait(&mut self) {
+        let target = self.last_trigger + self.period_us;
+        while get_time_us() < target {
+            // Yield to other tasks
+            yield_task();
+        }
+        self.last_trigger = target;
+    }
+
+    async fn check(&mut self) -> bool {
+        let current = get_time_us();
+        if current >= self.last_trigger + self.period_us {
+            self.last_trigger = current;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+fn yield_task() {
+    // Yield execution to scheduler
+    // Implementation depends on Forge's async runtime
+}
+
+// === BUILD CONFIGURATION ===
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_quaternion_normalization() {
+        let mut q = Quaternion { w: 2.0, x: 0.0, y: 0.0, z: 0.0 };
+        q.normalize();
+        assert_eq!(q.w, 1.0);
+    }
+
+    #[test]
+    fn test_pid_controller() {
+        let mut pid = PidController::new(1.0, 0.0, 0.0, 100.0, 10.0);
+        let output = pid.update(10.0, 0.001);
+        assert_eq!(output, 10.0); // P-only controller
+    }
+
+    #[test]
+    fn test_dshot_frame_generation() {
+        let controller = MotorController::new(&TIM2);
+        let frame = controller.create_dshot_frame(0.5);
+        assert!(frame >= 48 && frame <= 2047);
+    }
+}
+
